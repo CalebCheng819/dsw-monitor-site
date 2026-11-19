@@ -18,7 +18,7 @@ const metricKnown = (r,k) => m(r,k).fresh && m(r,k).latest !== null && m(r,k).la
 const allocations = [
  {id:'fudan',name:'复旦 · qianrui',gpu:16,nodes:[['dsw-ugznzc40h3d5vnlfx3',909],['dsw-vqavb9oc0or51bkgz5',991],['dsw-sq97gl9f1zru2bm1xh',946]]},
  {id:'ntu',name:'NTU · 胡连宇',gpu:12,nodes:[['dsw-hgq4odu0jfbvg7iu8x',951],['dsw-8ox9zktttck0mubnte',1020],['dsw-qwhdob2zqvzesz1ec5',874]]},
- {id:'xie',name:'独立合作者 · 谢育林',gpu:4,nodes:[['dsw-xpe3b8qiiq8a4zmi2u',1088]]},
+ {id:'xie',name:'独立合作者 · 谢育林',gpu:4,nodes:[['dsw-9gvgtpzp8iyuikul0q',855]]},
  {id:'hu',name:'独立合作者 · 胡刘兵',gpu:4,nodes:[['dsw-39vtkvrqohjlhps7yl',987]]},
  {id:'chen',name:'独立合作者 · 陈卢楷',gpu:12,nodes:[['dsw-jsvn6euz7njy70c36j',926],['dsw-x885rk24n7y8dtscod',945]]},
  {id:'zhang',name:'独立合作者 · 张玉鹏',gpu:4,nodes:[['dsw-1orp9falqappmmgj3z',923]]}
