@@ -37,7 +37,7 @@ function render() {
  $('refresh').textContent=inFlight?'↻ 正在读取…':state?.collecting?'↻ 采集中…':publicData?'↻ 刷新页面数据':'↻ 立即采集';
  const stale = !s || Date.now()-Date.parse(s.collected_at)>180000 || fromCache;
  $('sync').classList.toggle('warn',stale||!!state?.error||!!loadError);
- $('sync').textContent=loadError?'连接已断开':fromCache?'显示上次缓存':state?.error?'采集异常':!s?'首次采集中':stale?'数据已过期':state.collecting?'正在更新':'数据已同步';
+ $('sync').textContent=loadError?(stale?'自动重连 · 状态未确认':'自动重连 · 保留最近数据'):fromCache?'显示上次缓存':state?.error?'采集异常':!s?'首次采集中':stale?'数据已过期':state.collecting?'正在更新':'数据已同步';
  $('updated').textContent=s?`最近采集：${time(s.collected_at)}`:'等待首次实时数据…';
  const warnings=[];
  if(loadError)warnings.push(loadError);
@@ -107,29 +107,32 @@ async function fetchStatus(url,backup=false,controllers=[]){
  const timer=setTimeout(()=>controller.abort(),12000);
  try{
   const response=await fetch(url,{cache:'no-store',signal:controller.signal,headers:backup?{Accept:'application/vnd.github.raw+json'}:{}});
-  if(!response.ok)throw new Error('Data request failed');
-  const data=await response.json();
-  if(!validStatus(data))throw new Error('Invalid status data');
+  if(!response.ok)throw new Error(`HTTP ${response.status}`);
+  let data;try{data=await response.json();}catch{throw new Error('数据格式异常');}
+  if(!validStatus(data))throw new Error('数据格式异常');
   return data;
+ }catch(error){
+  const reason=controller.signal.aborted?'请求超时':/^HTTP \d{3}$/.test(error.message)||error.message==='数据格式异常'?error.message:'连接中断';
+  throw new Error(reason);
  }finally{clearTimeout(timer);}
 }
 function latestStatus(stamp){
  if(!fallbackData)return fetchStatus(publicData?`${publicData}?t=${stamp}`:'/api/status');
  // Start the backup after a short head start, rather than waiting out a stalled primary.
  return new Promise((resolve,reject)=>{
-  const controllers=[];let best=null,finished=0,startedBackup=false,settled=false;
+  const controllers=[],failures=[];let best=null,finished=0,startedBackup=false,settled=false;
   const finish=()=>{
    if(settled)return;
    if((best?.snapshot&&stamp-Date.parse(best.snapshot.collected_at)<=180000)||finished===2){
     settled=true;clearTimeout(hedge);controllers.forEach(c=>c.abort());
-    if(best)resolve(best);else reject(new Error('No data source available'));
+    if(best)resolve(best);else reject(new Error(failures.join('；')));
    }
   };
   const request=async(backup)=>{
    try{
     const data=await fetchStatus(backup?`${fallbackData}&t=${stamp}`:`${publicData}?t=${stamp}`,backup,controllers);
     if(!best||Date.parse(data.snapshot?.collected_at||0)>Date.parse(best.snapshot?.collected_at||0))best=data;
-   }catch{}finally{
+   }catch(error){failures.push(`${backup?'备用入口':'主入口'}：${error.message}`);}finally{
     finished++;finish();
     if(!settled&&!backup)startBackup();
    }
@@ -139,25 +142,41 @@ function latestStatus(stamp){
   request(false);
  });
 }
+function retryPoll(){
+ retryTimer=setTimeout(()=>{retryTimer=null;poll();},retryDelay);
+ retryDelay=Math.min(retryDelay*2,30000);
+}
 function poll(){
  if(inFlight)return inFlight;
  clearTimeout(retryTimer);retryTimer=null;
  inFlight=(async()=>{
   try{
-   let data=await latestStatus(Date.now());
+   let data;
+   // Absorb one failed read round before surfacing an interruption to the user.
+   for(let attempt=0;attempt<2;attempt++){
+    try{data=await latestStatus(Date.now());break;}catch(error){if(attempt===1)throw error;}
+   }
    // A CDN response must not replace a snapshot already known to be newer.
-   if(state?.snapshot&&Date.parse(state.snapshot.collected_at)>Date.parse(data.snapshot?.collected_at||0))data={...data,snapshot:state.snapshot};
-   state=data;fromCache=false;loadError='';retryDelay=5000;saveCache();return true;
-  }catch{
-   loadError=publicData?`暂时无法读取 GitHub 监控数据，${retryDelay/1000} 秒后自动重试。已有数据会保留，超过 3 分钟将标记过期。`:'无法连接本机采集器，请检查采集服务。';
-   if(publicData){retryTimer=setTimeout(()=>{retryTimer=null;poll();},retryDelay);retryDelay=Math.min(retryDelay*2,30000);}
-   if(!state)$('nodes').innerHTML='<tr><td colspan="8" class="empty">监控数据暂时无法读取，请点击刷新重试。</td></tr>';
+   if(state?.snapshot&&Date.parse(state.snapshot.collected_at)>Date.parse(data.snapshot?.collected_at||0))data=state;
+   state=data;fromCache=false;loadError='';
+   if(publicData&&(!state.snapshot||state.error||Date.now()-Date.parse(state.snapshot.collected_at)>180000))retryPoll();else retryDelay=5000;
+   saveCache();return true;
+  }catch(error){
+   loadError=publicData?`正在自动重连，${retryDelay/1000} 秒后自动重试，无需手动刷新。${error.message}。已有数据会保留，超过 3 分钟将标记过期。`:'无法连接本机采集器，请检查采集服务。';
+   if(publicData){
+    try{
+     const key=cacheKey+':connection-events',saved=JSON.parse(localStorage.getItem(key)||'[]'),history=Array.isArray(saved)?saved:[];
+     localStorage.setItem(key,JSON.stringify([...history,{at:new Date().toISOString(),reason:error.message}].slice(-20)));
+    }catch{}
+    retryPoll();
+   }
+   if(!state)$('nodes').innerHTML='<tr><td colspan="8" class="empty">监控数据暂时无法读取，正在自动重连，恢复后会自动显示。</td></tr>';
    return false;
   }finally{inFlight=null;render();}
  })();
  render();return inFlight;
 }
-$('refresh').addEventListener('click',async()=>{if(publicData){const ok=await poll();notify(ok?(state?.snapshot&&Date.now()-Date.parse(state.snapshot.collected_at)<=180000&&!state.error?'已读取最新页面数据':'已读取数据，但采集尚未更新，请查看提示'):'刷新失败，请检查网络后重试');return;}try{const response=await fetch('/api/refresh',{method:'POST',headers:{'X-DSW-Refresh':'1'}});if(!response.ok)throw new Error();const d=await response.json();notify(d.accepted?'已开始重新采集':'正在采集或请求间隔过短，请稍候');await poll();}catch{notify('暂时无法发起采集');}});
+$('refresh').addEventListener('click',async()=>{if(publicData){const ok=await poll();notify(ok?(state?.snapshot&&Date.now()-Date.parse(state.snapshot.collected_at)<=180000&&!state.error?'已读取最新页面数据':'已读取数据，但采集尚未更新，正在自动等待新数据'):'连接暂时中断，已自动重试，恢复后会自动更新');return;}try{const response=await fetch('/api/refresh',{method:'POST',headers:{'X-DSW-Refresh':'1'}});if(!response.ok)throw new Error();const d=await response.json();notify(d.accepted?'已开始重新采集':'正在采集或请求间隔过短，请稍候');await poll();}catch{notify('暂时无法发起采集');}});
 $('search').addEventListener('input',render);$('sort').addEventListener('change',render);
 document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{filter=b.dataset.filter;document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('selected',t===b));render();}));
 $('nodes').addEventListener('click',async e=>{const detail=e.target.closest('[data-detail]'),copy=e.target.closest('[data-copy]');if(detail){currentDetail=detail.dataset.detail;fillDetail(currentDetail);$('detail').showModal();}if(copy){const r=state.snapshot.instances.find(r=>r.id===copy.dataset.copy),p=ssh(r);if(p){try{await navigator.clipboard.writeText(`ssh -p ${p.port} root@${p.host}`);notify('已复制 SSH 命令');}catch{notify('浏览器未允许复制，请从详情查看地址');}}}});
