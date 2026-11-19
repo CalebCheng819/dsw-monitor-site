@@ -5,8 +5,9 @@ const labels = {Running:'运行中',Stopped:'已停止',Failed:'失败',Queuing:
 const fmt = x => typeof x === 'number' && Number.isFinite(x) ? `${x.toFixed(1)}%` : '未知';
 const time = v => v ? new Date(typeof v === 'number' ? v * 1000 : v).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}) : '—';
 const publicData = document.body.dataset.source || '';
+const fallbackData = document.body.dataset.fallback || '';
 if(publicData){document.querySelector('.private-tag').textContent='公开只读监控';document.querySelector('.interval').textContent='约每 60–90 秒更新 · 指标每 5 分钟采样';}
-let state = null, filter = 'all', visible = [], busy = false, currentDetail = null;
+let state = null, filter = 'all', visible = [], inFlight = null, currentDetail = null, loadError = '';
 const ssh = r => r.ports.find(p => String(p.service).toUpperCase() === 'SSH' && p.active && p.port);
 const portOrder = r => Number(ssh(r)?.port ?? 999999);
 const m = (r,k) => r.metrics[k] || {};
@@ -20,13 +21,14 @@ function metric(row,kind) {
 }
 function render() {
  const s=state?.snapshot;
- $('refresh').disabled=!!state?.collecting;
- $('refresh').textContent=state?.collecting?'↻ 采集中…':publicData?'↻ 刷新页面数据':'↻ 立即采集';
+ $('refresh').disabled=!!state?.collecting||!!inFlight;
+ $('refresh').textContent=inFlight?'↻ 正在读取…':state?.collecting?'↻ 采集中…':publicData?'↻ 刷新页面数据':'↻ 立即采集';
  const stale = !s || Date.now()-Date.parse(s.collected_at)>180000;
- $('sync').classList.toggle('warn',stale||!!state?.error);
- $('sync').textContent=state?.error?'采集异常':!s?'首次采集中':stale?'数据已过期':state.collecting?'正在更新':'数据已同步';
+ $('sync').classList.toggle('warn',stale||!!state?.error||!!loadError);
+ $('sync').textContent=loadError?'连接已断开':state?.error?'采集异常':!s?'首次采集中':stale?'数据已过期':state.collecting?'正在更新':'数据已同步';
  $('updated').textContent=s?`最近采集：${time(s.collected_at)}`:'等待首次实时数据…';
  const warnings=[];
+ if(loadError)warnings.push(loadError);
  if(state?.error)warnings.push(state.error);
  if(state?.publish_error)warnings.push(state.publish_error);
  if(stale&&s)warnings.push('最近数据已超过 3 分钟，请勿据此判断当前是否空闲。');
@@ -62,11 +64,37 @@ function chart(row,kind,title) {
  return `<div class="chart"><h3>${title}</h3><div class="chart-value">${metricKnown(row,kind)?fmt(val.latest):'未知 / 过期'}</div>${graph}<p>均值 ${fmt(val.avg)} · 峰值 ${fmt(val.max)} · ${val.samples||0} 个样本</p><p>最新采样：${time(val.latest_time)}</p></div>`;
 }
 function fillDetail(id){const r=state.snapshot.instances.find(r=>r.id===id);if(!r){$('detail').close();return;}const p=ssh(r);$('detail-name').textContent=r.name;$('detail-body').innerHTML=`<div class="detail-meta">${esc(r.id)}<br>状态：${esc(labels[r.status]||r.status)} · ${r.cpu} CPU / ${r.gpu} GPU / ${esc(r.memory)}<br>SSH：${p?esc(p.host)+':'+esc(p.port)+' · Ready':'无当前就绪映射'}<br>端口映射由平台返回，未执行连通性测试。</div><div class="charts">${chart(r,'CpuCoreUsage','CPU 利用率')}${chart(r,'GpuCoreUsage','GPU 利用率')}${chart(r,'MemoryUsage','内存使用率')}${chart(r,'GpuMemoryUsage','显存使用率')}</div>`;}
-async function poll(){if(busy)return;busy=true;try{const response=await fetch(publicData ? `${publicData}?t=${Date.now()}` : '/api/status',{cache:'no-store'});if(!response.ok)throw new Error();state=await response.json();render();}catch{if(state){state.error='无法获取最新监控数据，当前保留旧数据。';render();}$('sync').textContent='连接已断开';$('sync').classList.add('warn');$('notice').hidden=false;$('notice').textContent='无法获取最新监控数据，页面保留旧数据。';}finally{busy=false;}}
-$('refresh').addEventListener('click',async()=>{if(publicData){await poll();notify('已刷新页面数据，云端由采集器自动更新');return;}try{const response=await fetch('/api/refresh',{method:'POST',headers:{'X-DSW-Refresh':'1'}});if(!response.ok)throw new Error();const d=await response.json();notify(d.accepted?'已开始重新采集':'正在采集或请求间隔过短，请稍候');await poll();}catch{notify('暂时无法发起采集');}});
+async function fetchStatus(url,backup=false){
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),12000);
+ try{
+  const response=await fetch(url,{cache:'no-store',signal:controller.signal,headers:backup?{Accept:'application/vnd.github.raw+json'}:{}});
+  if(!response.ok)throw new Error('Data request failed');
+  const data=await response.json();
+  if(!data||!('snapshot' in data)||data.snapshot&&(!Array.isArray(data.snapshot.instances)||!Number.isFinite(Date.parse(data.snapshot.collected_at))))throw new Error('Invalid status data');
+  return data;
+ }finally{clearTimeout(timer);}
+}
+function poll(){
+ if(inFlight)return inFlight;
+ inFlight=(async()=>{
+  try{
+   const stamp=Date.now();let data;
+   try{data=await fetchStatus(publicData?`${publicData}?t=${stamp}`:'/api/status');}
+   catch(error){if(!fallbackData)throw error;data=await fetchStatus(`${fallbackData}&t=${stamp}`,true);}
+   state=data;loadError='';return true;
+  }catch{
+   loadError=publicData?'无法连接 GitHub 监控数据入口，请检查网络后重试。已有数据会保留，超过 3 分钟将标记过期。':'无法连接本机采集器，请检查采集服务。';
+   if(!state)$('nodes').innerHTML='<tr><td colspan="8" class="empty">监控数据暂时无法读取，请点击刷新重试。</td></tr>';
+   return false;
+  }finally{inFlight=null;render();}
+ })();
+ render();return inFlight;
+}
+$('refresh').addEventListener('click',async()=>{if(publicData){const ok=await poll();notify(ok?'已读取最新页面数据':'刷新失败，请检查网络后重试');return;}try{const response=await fetch('/api/refresh',{method:'POST',headers:{'X-DSW-Refresh':'1'}});if(!response.ok)throw new Error();const d=await response.json();notify(d.accepted?'已开始重新采集':'正在采集或请求间隔过短，请稍候');await poll();}catch{notify('暂时无法发起采集');}});
 $('search').addEventListener('input',render);$('sort').addEventListener('change',render);
 document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{filter=b.dataset.filter;document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('selected',t===b));render();}));
 $('nodes').addEventListener('click',async e=>{const detail=e.target.closest('[data-detail]'),copy=e.target.closest('[data-copy]');if(detail){currentDetail=detail.dataset.detail;fillDetail(currentDetail);$('detail').showModal();}if(copy){const r=state.snapshot.instances.find(r=>r.id===copy.dataset.copy),p=ssh(r);if(p){try{await navigator.clipboard.writeText(`ssh -p ${p.port} root@${p.host}`);notify('已复制 SSH 命令');}catch{notify('浏览器未允许复制，请从详情查看地址');}}}});
 $('close').addEventListener('click',()=>$('detail').close());$('detail').addEventListener('click',e=>{if(e.target===$('detail'))$('detail').close();});
 $('export').addEventListener('click',()=>{if(!state?.snapshot)return notify('请等待首次采集');const cell=v=>'"'+String(v??'').replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')+'"';const rows=[['实例ID','名称','状态','SSH地址','SSH端口','CPU核数','GPU数','CPU最新%','CPU均值%','GPU最新%','GPU均值%','采集时间'],...visible.map(r=>[r.id,r.name,r.status,ssh(r)?.host,ssh(r)?.port,r.cpu,r.gpu,m(r,'CpuCoreUsage').latest,m(r,'CpuCoreUsage').avg,m(r,'GpuCoreUsage').latest,m(r,'GpuCoreUsage').avg,state.snapshot.collected_at])];const url=URL.createObjectURL(new Blob(['\uFEFF'+rows.map(r=>r.map(cell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='dsw-nodes.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
-poll();setInterval(poll,publicData?60000:5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});
+poll();setInterval(poll,publicData?60000:5000);setInterval(()=>{if(state)render();},15000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});
