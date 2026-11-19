@@ -79,9 +79,19 @@ function poll(){
  if(inFlight)return inFlight;
  inFlight=(async()=>{
   try{
-   const stamp=Date.now();let data;
+   const stamp=Date.now();let data,primaryError;
    try{data=await fetchStatus(publicData?`${publicData}?t=${stamp}`:'/api/status');}
-   catch(error){if(!fallbackData)throw error;data=await fetchStatus(`${fallbackData}&t=${stamp}`,true);}
+   catch(error){primaryError=error;}
+   const collected=data?.snapshot?.collected_at;
+   if(fallbackData&&(!collected||stamp-Date.parse(collected)>180000)){
+    try{
+     const backup=await fetchStatus(`${fallbackData}&t=${stamp}`,true);
+     if(!data||!collected||Date.parse(backup.snapshot?.collected_at)>Date.parse(collected))data=backup;
+    }catch(error){if(!data)throw error;}
+   }
+   if(!data)throw primaryError;
+   // A CDN response must not replace a snapshot already known to be newer.
+   if(state?.snapshot&&Date.parse(state.snapshot.collected_at)>Date.parse(data.snapshot?.collected_at||0))data={...data,snapshot:state.snapshot};
    state=data;loadError='';return true;
   }catch{
    loadError=publicData?'无法连接 GitHub 监控数据入口，请检查网络后重试。已有数据会保留，超过 3 分钟将标记过期。':'无法连接本机采集器，请检查采集服务。';
