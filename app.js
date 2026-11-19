@@ -20,6 +20,16 @@ function metric(row,kind) {
  const val=m(row,kind),known=metricKnown(row,kind),n=known?val.latest:0;
  return `<div class="metric ${kind==='GpuCoreUsage'?'gpu':''}"><div class="metric-top ${known&&n<20?'metric-low':''}">${known?fmt(n):'未知 / 过期'}</div><svg class="metric-bar" width="100" height="4" aria-hidden="true"><rect width="100" height="4" fill="#edf2f6"/><rect width="${Math.min(100,Math.max(0,n))}" height="4" fill="${kind==='GpuCoreUsage'?'#529abc':'#7eada3'}"/></svg><div class="submetric">1h 均值 ${fmt(val.avg)}</div></div>`;
 }
+function renderQueryErrors(snapshot) {
+ const errors=snapshot?.errors||[],rows=new Map((snapshot?.instances||[]).map(r=>[r.id,r]));
+ const scopes={inventory:'实例详情',CpuCoreUsage:'CPU 利用率',GpuCoreUsage:'GPU 利用率',MemoryUsage:'内存使用率',GpuMemoryUsage:'显存使用率'};
+ $('query-errors').hidden=!errors.length;
+ $('query-error-count').textContent=`${errors.length} 项`;
+ $('query-error-rows').innerHTML=errors.map(error=>{
+  const row=rows.get(error.id),port=row&&ssh(row);
+  return `<tr><td><strong>${esc(row?.name||'名称未知')}</strong><div class="instance-id">${esc(error.id)}</div></td><td>${port?esc(port.port):'<span class="muted">无就绪映射</span>'}</td><td><span class="badge unknown">${esc(scopes[error.scope]||error.scope)}</span></td><td>${error.scope==='inventory'?'实例状态、配置和端口未知':'该指标已标记未知'}<div class="query-error-note">本轮未取得数据，等待下轮重试</div></td></tr>`;
+ }).join('');
+}
 function render() {
  const s=state?.snapshot;
  $('refresh').disabled=!!state?.collecting||!!inFlight;
@@ -35,8 +45,9 @@ function render() {
  if(state?.cache_error)warnings.push(state.cache_error);
  if(fromCache)warnings.push('当前显示上次缓存，正在尝试连接；尚未确认当前状态。');
  if(s&&Date.now()-Date.parse(s.collected_at)>180000)warnings.push('最近数据已超过 3 分钟，请勿据此判断当前是否空闲。');
- if(s?.errors?.length)warnings.push(`${s.errors.length} 项查询未成功，对应数据已标记未知。`);
+ if(s?.errors?.length)warnings.push(`${s.errors.length} 项查询未成功，详见下方「查询未成功」清单。`);
  $('notice').hidden=!warnings.length;$('notice').textContent=warnings.join(' ');
+ renderQueryErrors(s);
  if(!s)return;
  const rows=s.instances,running=rows.filter(r=>r.status==='Running'),idle=running.filter(r=>r.idle&&!stale&&!state.error);
  $('summary').innerHTML=stat('全部 DSW',rows.length,'台',`${rows.length-running.length} 台未运行或状态未知`)+stat('运行中',running.length,'台',`${running.reduce((a,r)=>a+r.cpu,0)} 核 CPU 已分配`,true)+stat('已分配 GPU',running.reduce((a,r)=>a+r.gpu,0),'张','统计所有运行中节点')+stat('比较空闲',idle.length,'台',`${idle.reduce((a,r)=>a+r.gpu,0)} 张 GPU · CPU / GPU 均低于 20%`,true);
@@ -72,7 +83,7 @@ function validStatus(data){
  if(!object(data)||!('snapshot' in data))return false;
  const s=data.snapshot;if(s===null)return true;
  if(!object(s)||!Array.isArray(s.instances)||!Number.isFinite(Date.parse(s.collected_at))||Date.parse(s.collected_at)>Date.now()+60000)return false;
- if(s.errors!==undefined&&!Array.isArray(s.errors))return false;
+ if(s.errors!==undefined&&(!Array.isArray(s.errors)||!s.errors.every(e=>object(e)&&typeof e.id==='string'&&typeof e.scope==='string')))return false;
  const ids=new Set();
  return s.instances.every(r=>{
   if(!object(r)||typeof r.id!=='string'||ids.has(r.id)||typeof r.name!=='string'||typeof r.status!=='string'||!Number.isFinite(r.cpu)||r.cpu<0||!Number.isFinite(r.gpu)||r.gpu<0||!Array.isArray(r.ports)||!object(r.metrics))return false;
