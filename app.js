@@ -31,6 +31,22 @@ function groupUsage(rows,kind,weight,confirmed){
  const covered=known.reduce((a,r)=>a+r[weight],0);
  return {total,covered,avg:covered?known.reduce((a,r)=>a+m(r,kind).avg*r[weight],0)/covered:null};
 }
+function groupNodeUsage(row,kind,confirmed){
+ if(!row||row.status!=='Running')return '<span class="group-node-value muted">—</span>';
+ const val=m(row,kind),known=confirmed&&metricKnown(row,kind)&&Number.isFinite(val.latest);
+ const sampled=known&&val.latest_time?new Date(typeof val.latest_time==='number'?val.latest_time*1000:val.latest_time).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,hour:'2-digit',minute:'2-digit'}):'';
+ return `<span class="group-node-value${known&&val.latest<20?' metric-low':''}" title="${esc(known?'最新采样：'+time(val.latest_time):confirmed?'该指标缺失或过期':'当前数据尚未确认')}">${known?fmt(val.latest):confirmed?'未知 / 过期':'未确认'}${sampled?`<small>${sampled}</small>`:''}</span>`;
+}
+function groupNodes(group,members,confirmed){
+ const entries=group.nodes.length?group.nodes.map(([id,port])=>({row:members.find(r=>r.id===id),assignedPort:port})):members.map(row=>({row}));
+ entries.sort((a,b)=>(Number(ssh(a.row||{ports:[]})?.port??a.assignedPort??999999)-Number(ssh(b.row||{ports:[]})?.port??b.assignedPort??999999))||String(a.row?.name||'').localeCompare(String(b.row?.name||'')));
+ const body=entries.map(({row,assignedPort})=>{
+  const current=row&&ssh(row),port=current?.port??assignedPort;
+  const note=!row?'未查询到':!current?(assignedPort?'分配端口 · ':'')+(row.status==='Running'?'无就绪映射':labels[row.status]||row.status):row.status!=='Running'?(labels[row.status]||row.status):'';
+  return `<span class="group-node-row" title="${esc(row?.name||'节点未查询到')}"><span class="group-node-port">${port?esc(port):'无就绪端口'}${!port?`<small>${esc(row?.name)}</small>`:''}${note?`<small>${esc(note)}</small>`:''}</span>${groupNodeUsage(row,'CpuCoreUsage',confirmed)}${groupNodeUsage(row,'GpuCoreUsage',confirmed)}</span>`;
+ }).join('');
+ return `<span class="group-nodes"><span class="group-node-heading"><span>端口</span><span>当前 CPU</span><span>当前 GPU</span></span>${body||'<span class="group-node-empty">暂无节点</span>'}</span>`;
+}
 function renderGroups(rows,confirmed){
  const selected=$('group').value||'all';
  $('group-count').textContent='6 组 · 分配 52 张 GPU';
@@ -41,7 +57,7 @@ function renderGroups(rows,confirmed){
   const unknown=running.filter(r=>!confirmed||!metricKnown(r,'CpuCoreUsage')||!metricKnown(r,'GpuCoreUsage')||!m(r,'CpuCoreUsage').complete_hour||!m(r,'GpuCoreUsage').complete_hour).length;
   const missing=g.nodes.filter(([id])=>!members.some(r=>r.id===id)).length;
   const usage=(value,unit)=>`${fmt(value.avg)} <span class="coverage">${value.covered}/${value.total} ${unit}有效</span>`;
-  return `<button class="group-card${selected===g.id?' selected':''}" data-group="${g.id}" aria-pressed="${selected===g.id}"><span class="group-name">${esc(g.name)}</span><span class="group-capacity">${gpu}<small> 张运行 / ${g.gpu===null?'未设定':g.gpu+' 张分配'}</small></span><span class="group-ports">${g.nodes.length?'分配端口 '+g.nodes.map(([,port])=>port).join(' · '):'未列入当前分配的节点'}</span><span class="group-usage">近 1h CPU ${usage(cpuUsage,'核')}<br>近 1h GPU ${usage(gpuUsage,'卡')}</span><span class="group-status">${members.length} 台 · ${running.length} 运行 · ${members.length-running.length} 未运行${missing?' · '+missing+' 未查询到':''}<br>${confirmed?`比较空闲 ${idle.length} 台 / ${idle.reduce((a,r)=>a+r.gpu,0)} 卡 · 判断未知 ${unknown} 台`:'数据未确认，暂停用量与空闲判断'}</span></button>`;
+  return `<button class="group-card${selected===g.id?' selected':''}" data-group="${g.id}" aria-pressed="${selected===g.id}"><span class="group-name">${esc(g.name)}</span><span class="group-capacity">${gpu}<small> 张运行 / ${g.gpu===null?'未设定':g.gpu+' 张分配'}</small></span><span class="group-ports">${g.nodes.length?'分配端口 '+g.nodes.map(([,port])=>port).join(' · '):'未列入当前分配的节点'}</span>${groupNodes(g,members,confirmed)}<span class="group-usage">近 1h CPU ${usage(cpuUsage,'核')}<br>近 1h GPU ${usage(gpuUsage,'卡')}</span><span class="group-status">${members.length} 台 · ${running.length} 运行 · ${members.length-running.length} 未运行${missing?' · '+missing+' 未查询到':''}<br>${confirmed?`比较空闲 ${idle.length} 台 / ${idle.reduce((a,r)=>a+r.gpu,0)} 卡 · 判断未知 ${unknown} 台`:'数据未确认，暂停用量与空闲判断'}</span></button>`;
  }).join('');
 }
 $('group').innerHTML='<option value="all">全部分组</option>'+[...allocations,unassigned].map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('');
