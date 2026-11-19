@@ -11,9 +11,11 @@ const fmt = x => typeof x === 'number' && Number.isFinite(x) ? `${x.toFixed(1)}%
 const time = v => v ? new Date(typeof v === 'number' ? v * 1000 : v).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}) : '—';
 const publicData = document.body.dataset.source || '';
 const fallbackData = document.body.dataset.fallback || '';
-if(publicData){document.querySelector('.private-tag').textContent='公开只读监控';document.querySelector('.interval').textContent='约每 60–90 秒更新 · 指标每 5 分钟采样';}
+if(publicData){document.querySelector('.private-tag').textContent='公开只读监控';document.querySelector('.interval').textContent='每 15 秒同步 · 约每分钟采集 · 指标每 5 分钟采样';}
 let state = null, filter = 'all', visible = [], inFlight = null, currentDetail = null, loadError = '', fromCache = false;
 let retryTimer = null, retryDelay = 5000;
+let backupAfter = 0;
+const preferredAge = 60000;
 const cacheKey = `dsw-monitor-v1:${publicData || 'local'}`;
 const ssh = r => r.ports.find(p => String(p.service).toUpperCase() === 'SSH' && p.active && p.port);
 const portOrder = r => Number(ssh(r)?.port ?? 999999);
@@ -163,6 +165,11 @@ async function fetchStatus(url,backup=false,controllers=[]){
  const timer=setTimeout(()=>controller.abort(),12000);
  try{
   const response=await fetch(url,{cache:'no-store',signal:controller.signal,headers:backup?{Accept:'application/vnd.github.raw+json'}:{}});
+  if(backup&&(response.status===403||response.status===429)){
+   const reset=Number(response.headers?.get('x-ratelimit-reset'))*1000;
+   const wait=Number(response.headers?.get('retry-after'))*1000;
+   backupAfter=Math.max(backupAfter,Date.now()+60000,Number.isFinite(reset)?reset:0,Number.isFinite(wait)?Date.now()+wait:0);
+  }
   if(!response.ok)throw new Error(`HTTP ${response.status}`);
   let data;try{data=await response.json();}catch{throw new Error('数据格式异常');}
   if(!validStatus(data))throw new Error('数据格式异常');
@@ -179,7 +186,7 @@ function latestStatus(stamp){
   const controllers=[],failures=[];let best=null,finished=0,startedBackup=false,settled=false;
   const finish=()=>{
    if(settled)return;
-   if((best?.snapshot&&stamp-Date.parse(best.snapshot.collected_at)<=180000)||finished===2){
+   if((best?.snapshot&&!best.error&&stamp-Date.parse(best.snapshot.collected_at)<=preferredAge)||finished===2){
     settled=true;clearTimeout(hedge);controllers.forEach(c=>c.abort());
     if(best)resolve(best);else reject(new Error(failures.join('；')));
    }
@@ -193,7 +200,13 @@ function latestStatus(stamp){
     if(!settled&&!backup)startBackup();
    }
   };
-  const startBackup=()=>{if(!startedBackup&&!settled){startedBackup=true;request(true);}};
+  const startBackup=()=>{
+   if(startedBackup||settled)return;
+   startedBackup=true;
+   // Budget the unauthenticated API to under 60 reads/hour in a long outage.
+   if(Date.now()<backupAfter){finished++;failures.push('备用入口：等待下次可用请求');finish();return;}
+   backupAfter=Date.now()+65000;request(true);
+  };
   const hedge=setTimeout(startBackup,1500);
   request(false);
  });
@@ -207,15 +220,15 @@ function poll(){
  clearTimeout(retryTimer);retryTimer=null;
  inFlight=(async()=>{
   try{
-   let data;
+   let data;const readFailures=[];
    // Absorb one failed read round before surfacing an interruption to the user.
    for(let attempt=0;attempt<2;attempt++){
-    try{data=await latestStatus(Date.now());break;}catch(error){if(attempt===1)throw error;}
+    try{data=await latestStatus(Date.now());break;}catch(error){readFailures.push(error.message);if(attempt===1)throw new Error([...new Set(readFailures)].join('；'));}
    }
    // A CDN response must not replace a snapshot already known to be newer.
    if(state?.snapshot&&Date.parse(state.snapshot.collected_at)>Date.parse(data.snapshot?.collected_at||0))data=state;
    state=data;fromCache=false;loadError='';
-   if(publicData&&(!state.snapshot||state.error||Date.now()-Date.parse(state.snapshot.collected_at)>180000))retryPoll();else retryDelay=5000;
+   if(publicData&&(!state.snapshot||state.error||Date.now()-Date.parse(state.snapshot.collected_at)>preferredAge))retryPoll();else retryDelay=5000;
    saveCache();return true;
   }catch(error){
    loadError=publicData?`正在自动重连，${retryDelay/1000} 秒后自动重试，无需手动刷新。${error.message}。已有数据会保留，超过 3 分钟将标记过期。`:'无法连接本机采集器，请检查采集服务。';
@@ -240,6 +253,8 @@ document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click'
 $('nodes').addEventListener('click',async e=>{const detail=e.target.closest('[data-detail]'),copy=e.target.closest('[data-copy]');if(detail){currentDetail=detail.dataset.detail;if(fillDetail(currentDetail))$('detail').showModal();}if(copy){const r=state.snapshot.instances.find(r=>r.id===copy.dataset.copy),p=ssh(r);if(p){try{await navigator.clipboard.writeText(`ssh -p ${p.port} root@${p.host}`);notify('已复制 SSH 命令');}catch{notify('浏览器未允许复制，请从详情查看地址');}}}});
 $('close').addEventListener('click',()=>$('detail').close());$('detail').addEventListener('click',e=>{if(e.target===$('detail'))$('detail').close();});
 $('export').addEventListener('click',()=>{if(!state?.snapshot)return notify('请等待首次采集');const cell=v=>'"'+String(v??'').replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')+'"';const rows=[['实例ID','名称','分组','状态','SSH地址','SSH端口','CPU核数','GPU数','CPU最新%','CPU均值%','GPU最新%','GPU均值%','采集时间'],...visible.map(r=>[r.id,r.name,groupOf(r).name,r.status,ssh(r)?.host,ssh(r)?.port,r.cpu,r.gpu,m(r,'CpuCoreUsage').latest,m(r,'CpuCoreUsage').avg,m(r,'GpuCoreUsage').latest,m(r,'GpuCoreUsage').avg,state.snapshot.collected_at])];const url=URL.createObjectURL(new Blob(['\uFEFF'+rows.map(r=>r.map(cell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='dsw-nodes.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
-restoreCache();poll();setInterval(poll,publicData?60000:5000);setInterval(()=>{if(state)render();},15000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});
+restoreCache();poll();setInterval(poll,publicData?15000:5000);setInterval(()=>{if(state)render();},15000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});
 
 window.addEventListener('online',()=>poll());
+window.addEventListener('focus',()=>poll());
+window.addEventListener('pageshow',()=>poll());
