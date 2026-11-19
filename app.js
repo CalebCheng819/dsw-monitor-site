@@ -48,9 +48,9 @@ function groupNodes(group,members,confirmed){
  const body=entries.map(({row,assignedPort})=>{
   const current=row&&ssh(row),port=current?.port??assignedPort;
   const note=!row?'未查询到':!current?(assignedPort?'分配端口 · ':'')+(row.status==='Running'?'无就绪映射':labels[row.status]||row.status):row.status!=='Running'?(labels[row.status]||row.status):'';
-  return `<span class="group-node-row" title="${esc(row?.name||'节点未查询到')}"><span class="group-node-port">${port?esc(port):'无就绪端口'}${!port?`<small>${esc(row?.name)}</small>`:''}${note?`<small>${esc(note)}</small>`:''}</span>${groupNodeUsage(row,'CpuCoreUsage',confirmed)}${groupNodeUsage(row,'GpuCoreUsage',confirmed)}</span>`;
+  return `<span class="group-node-row" title="${esc(row?.name||'节点未查询到')}"><span class="group-node-port">${port?esc(port):'无就绪端口'}${!port?`<small>${esc(row?.name)}</small>`:''}${note?`<small>${esc(note)}</small>`:''}</span><span class="group-node-gpu">${row?esc(row.gpu)+' 张':'未知'}</span>${groupNodeUsage(row,'CpuCoreUsage',confirmed)}${groupNodeUsage(row,'GpuCoreUsage',confirmed)}</span>`;
  }).join('');
- return `<span class="group-nodes"><span class="group-node-heading"><span>端口</span><span>当前 CPU</span><span>当前 GPU</span></span>${body||'<span class="group-node-empty">暂无节点</span>'}</span>`;
+ return `<span class="group-nodes"><span class="group-node-heading"><span>端口</span><span>GPU 数</span><span>当前 CPU</span><span>当前 GPU</span></span>${body||'<span class="group-node-empty">暂无节点</span>'}</span>`;
 }
 function renderGroups(rows,confirmed){
  const selected=$('group').value||'all';
