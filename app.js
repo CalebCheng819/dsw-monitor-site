@@ -8,6 +8,7 @@ const publicData = document.body.dataset.source || '';
 const fallbackData = document.body.dataset.fallback || '';
 if(publicData){document.querySelector('.private-tag').textContent='公开只读监控';document.querySelector('.interval').textContent='约每 60–90 秒更新 · 指标每 5 分钟采样';}
 let state = null, filter = 'all', visible = [], inFlight = null, currentDetail = null, loadError = '', fromCache = false;
+let retryTimer = null, retryDelay = 5000;
 const cacheKey = `dsw-monitor-v1:${publicData || 'local'}`;
 const ssh = r => r.ports.find(p => String(p.service).toUpperCase() === 'SSH' && p.active && p.port);
 const portOrder = r => Number(ssh(r)?.port ?? 999999);
@@ -40,7 +41,10 @@ function render() {
  $('updated').textContent=s?`最近采集：${time(s.collected_at)}`:'等待首次实时数据…';
  const warnings=[];
  if(loadError)warnings.push(loadError);
- if(state?.error)warnings.push(state.error);
+ if(state?.error){
+  const stage={authentication:'认证读取',inventory:'实例列表查询',collector:'数据采集'}[state.collection_failure?.stage];
+  warnings.push(`${stage?stage+'失败：':''}${state.error}`);
+ }
  if(state?.publish_error)warnings.push(state.publish_error);
  if(state?.cache_error)warnings.push(state.cache_error);
  if(fromCache)warnings.push('当前显示上次缓存，正在尝试连接；尚未确认当前状态。');
@@ -137,14 +141,16 @@ function latestStatus(stamp){
 }
 function poll(){
  if(inFlight)return inFlight;
+ clearTimeout(retryTimer);retryTimer=null;
  inFlight=(async()=>{
   try{
    let data=await latestStatus(Date.now());
    // A CDN response must not replace a snapshot already known to be newer.
    if(state?.snapshot&&Date.parse(state.snapshot.collected_at)>Date.parse(data.snapshot?.collected_at||0))data={...data,snapshot:state.snapshot};
-   state=data;fromCache=false;loadError='';saveCache();return true;
+   state=data;fromCache=false;loadError='';retryDelay=5000;saveCache();return true;
   }catch{
-   loadError=publicData?'无法连接 GitHub 监控数据入口，请检查网络后重试。已有数据会保留，超过 3 分钟将标记过期。':'无法连接本机采集器，请检查采集服务。';
+   loadError=publicData?`暂时无法读取 GitHub 监控数据，${retryDelay/1000} 秒后自动重试。已有数据会保留，超过 3 分钟将标记过期。`:'无法连接本机采集器，请检查采集服务。';
+   if(publicData){retryTimer=setTimeout(()=>{retryTimer=null;poll();},retryDelay);retryDelay=Math.min(retryDelay*2,30000);}
    if(!state)$('nodes').innerHTML='<tr><td colspan="8" class="empty">监控数据暂时无法读取，请点击刷新重试。</td></tr>';
    return false;
   }finally{inFlight=null;render();}
