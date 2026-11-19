@@ -50,9 +50,9 @@ function groupNodes(group,members,confirmed){
  const body=entries.map(({row,assignedPort})=>{
   const current=row&&ssh(row),port=current?.port??assignedPort;
   const note=!row?'未查询到':!current?(assignedPort?'分配端口 · ':'')+(row.status==='Running'?'无就绪映射':labels[row.status]||row.status):row.status!=='Running'?(labels[row.status]||row.status):'';
-  return `<span class="group-node-row" title="${esc(row?.name||'节点未查询到')}"><span class="group-node-port">${port?esc(port):'无就绪端口'}${!port?`<small>${esc(row?.name)}</small>`:''}${note?`<small>${esc(note)}</small>`:''}</span><span class="group-node-gpu">${row?esc(row.gpu)+' 张':'未知'}</span>${groupNodeUsage(row,'CpuCoreUsage',confirmed)}${groupNodeUsage(row,'GpuCoreUsage',confirmed)}</span>`;
+  return `<span class="group-node-row" title="${esc(row?.name||'节点未查询到')}"><span class="group-node-port">${port?esc(port):'无就绪端口'}${!port?`<small>${esc(row?.name)}</small>`:''}${note?`<small>${esc(note)}</small>`:''}</span><span class="group-node-gpu">${row?esc(row.gpu)+' 张':'未知'}</span>${groupNodeUsage(row,'CpuCoreUsage',confirmed)}${groupNodeUsage(row,'GpuCoreUsage',confirmed)}${groupNodeUsage(row,'GpuMemoryUsage',confirmed)}</span>`;
  }).join('');
- return `<span class="group-nodes"><span class="group-node-heading"><span>端口</span><span>GPU 数</span><span>当前 CPU</span><span>当前 GPU</span></span>${body||'<span class="group-node-empty">暂无节点</span>'}</span>`;
+ return `<span class="group-nodes"><span class="group-node-heading"><span>端口</span><span>GPU 数</span><span>当前 CPU</span><span>当前 GPU</span><span>当前显存</span></span>${body||'<span class="group-node-empty">暂无节点</span>'}</span>`;
 }
 function renderGroups(rows,confirmed){
  const selected=$('group').value||'all';
@@ -122,8 +122,8 @@ function render() {
   const p=ssh(r),known=metricKnown(r,'CpuCoreUsage')&&metricKnown(r,'GpuCoreUsage');
   const badge=stale||state.error?'数据过期':r.status!=='Running'?'—':r.idle?'比较空闲':!known||!m(r,'CpuCoreUsage').complete_hour||!m(r,'GpuCoreUsage').complete_hour?'数据不足':'有资源使用';
   const tone=badge==='比较空闲'?'idle':badge==='有资源使用'?'busy':'unknown';
-  return `<tr><td><button class="node-name" data-detail="${esc(r.id)}">${esc(r.name||'未命名节点')}</button><div class="node-group">${esc(groupOf(r).name)}</div><div class="instance-id">${esc(r.id)}</div></td><td>${p?`<button class="port" data-copy="${esc(r.id)}" title="复制 SSH 连接命令">${esc(p.port)}</button>`:'<span class="muted">无就绪映射</span>'}</td><td><span class="status"><i class="dot ${r.status==='Running'?'green':r.status==='Failed'?'red':r.status==='Queuing'?'amber':''}"></i>${esc(labels[r.status]||r.status)}</span></td><td><div class="resource">${r.gpu} GPU · ${r.cpu} CPU</div><div class="instance-id">${esc(r.memory)}</div></td><td>${metric(r,'CpuCoreUsage')}</td><td>${metric(r,'GpuCoreUsage')}</td><td><span class="badge ${tone}">${badge}</span></td><td><button class="row-action" data-detail="${esc(r.id)}">详情</button></td></tr>`;
- }).join('')||'<tr><td colspan="8" class="empty">没有符合筛选条件的节点</td></tr>';
+  return `<tr><td><button class="node-name" data-detail="${esc(r.id)}">${esc(r.name||'未命名节点')}</button><div class="node-group">${esc(groupOf(r).name)}</div><div class="instance-id">${esc(r.id)}</div></td><td>${p?`<button class="port" data-copy="${esc(r.id)}" title="复制 SSH 连接命令">${esc(p.port)}</button>`:'<span class="muted">无就绪映射</span>'}</td><td><span class="status"><i class="dot ${r.status==='Running'?'green':r.status==='Failed'?'red':r.status==='Queuing'?'amber':''}"></i>${esc(labels[r.status]||r.status)}</span></td><td><div class="resource">${r.gpu} GPU · ${r.cpu} CPU</div><div class="instance-id">${esc(r.memory)}</div></td><td>${metric(r,'CpuCoreUsage')}</td><td>${metric(r,'GpuCoreUsage')}</td><td>${metric(r,'GpuMemoryUsage')}</td><td><span class="badge ${tone}">${badge}</span></td><td><button class="row-action" data-detail="${esc(r.id)}">详情</button></td></tr>`;
+ }).join('')||'<tr><td colspan="9" class="empty">没有符合筛选条件的节点</td></tr>';
  $('window').textContent=`指标窗口：${time(s.window_start)} — ${time(s.window_end)} · 5 分钟采样 · 名称直接读取 PAI 接口`;
  if(currentDetail&&$('detail').open)fillDetail(currentDetail);
 }
@@ -239,7 +239,7 @@ function poll(){
     }catch{}
     retryPoll();
    }
-   if(!state)$('nodes').innerHTML='<tr><td colspan="8" class="empty">监控数据暂时无法读取，正在自动重连，恢复后会自动显示。</td></tr>';
+   if(!state)$('nodes').innerHTML='<tr><td colspan="9" class="empty">监控数据暂时无法读取，正在自动重连，恢复后会自动显示。</td></tr>';
    return false;
   }finally{inFlight=null;render();}
  })();
