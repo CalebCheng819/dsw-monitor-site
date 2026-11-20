@@ -77,6 +77,29 @@ function metric(row,kind) {
  const val=m(row,kind),known=metricKnown(row,kind),n=known?val.latest:0;
  return `<div class="metric ${kind==='GpuCoreUsage'?'gpu':''}"><div class="metric-top ${known&&n<20?'metric-low':''}">${known?fmt(n):'未知 / 过期'}</div><svg class="metric-bar" width="100" height="4" aria-hidden="true"><rect width="100" height="4" fill="#edf2f6"/><rect width="${Math.min(100,Math.max(0,n))}" height="4" fill="${kind==='GpuCoreUsage'?'#529abc':'#7eada3'}"/></svg><div class="submetric">1h 均值 ${fmt(val.avg)}</div></div>`;
 }
+function trainingRows(rows,confirmed){
+ const fresh=v=>Number.isFinite(Date.parse(v))&&Date.now()-Date.parse(v)>=-60000&&Date.now()-Date.parse(v)<=180000;
+ return rows.filter(r=>r.status==='Running'&&r.gpu===8).sort((a,b)=>portOrder(a)-portOrder(b)).flatMap(row=>{
+  const p=ssh(row),training=row.training||{},observed=fresh(training.observed_at),jobs=Array.isArray(training.jobs)?training.jobs:[];
+  const node=`<strong>${p?esc(p.port):'无就绪映射'}</strong><div class="instance-id">${esc(row.name)}</div>`;
+  if(!jobs.length){
+   const reason=training.status==='pending'||!row.training?'正在读取程序信息':training.status==='unavailable'?(training.reason==='host_key'?'节点身份校验未通过':'程序信息读取未成功'):'未识别到可估算进度的程序';
+   return [`<tr><td>${node}</td><td class="muted">${reason}</td><td>—</td><td>暂无法估算</td><td class="submetric">${training.observed_at?'最近读取：'+time(training.observed_at):'等待首次读取'}<br>下轮自动重试</td></tr>`];
+  }
+  return jobs.map(job=>{
+   const hasProgress=Number.isFinite(job.step)&&Number.isFinite(job.total)&&job.total>0&&job.step>=0&&job.step<=job.total;
+   const known=confirmed&&observed&&hasProgress&&fresh(job.progress_at)&&job.status==='running'&&Number.isFinite(Date.parse(job.eta_at))&&Date.parse(job.eta_at)>Date.now();
+   const expired=!confirmed||!observed||(job.progress_at&&!fresh(job.progress_at));
+   const eta=known?time(job.eta_at):expired?'数据过期，暂停估算':job.status==='target_reached'?'目标步数已达到，等待结束确认':'暂无法估算';
+   const progress=hasProgress?`${job.step.toLocaleString('zh-CN')} / ${job.total.toLocaleString('zh-CN')}<br><span class="submetric">${(job.step/job.total*100).toFixed(1)}%${expired?' · 上次进度':''}</span>`:'暂无可用进度';
+   return `<tr><td>${node}</td><td><strong>${esc(job.program)}</strong><div class="submetric">${esc(job.stage||'')}</div></td><td>${progress}</td><td class="training-eta">${eta}<div class="submetric">${esc(job.scope||'缺少目标或速度，无法估算')}</div></td><td class="submetric">${esc(job.method||'未取得可估算的训练日志')}<br>最近读取：${time(training.observed_at)}${job.progress_at?'<br>进度时间：'+time(job.progress_at):''}</td></tr>`;
+  });
+ }).join('');
+}
+function renderTraining(rows,confirmed){
+ $('training-panel').hidden=!rows.some(r=>r.status==='Running'&&r.gpu===8);
+ $('training-rows').innerHTML=trainingRows(rows,confirmed);
+}
 function renderQueryErrors(snapshot) {
  const errors=displayedErrors(snapshot),rows=new Map((snapshot?.instances||[]).map(r=>[r.id,r]));
  const scopes={inventory:'实例详情',CpuCoreUsage:'CPU 利用率',GpuCoreUsage:'GPU 利用率',MemoryUsage:'内存使用率',GpuMemoryUsage:'显存使用率'};
@@ -113,6 +136,7 @@ function render() {
  const rows=s.instances.filter(isDisplayed),running=rows.filter(r=>r.status==='Running'),idle=running.filter(r=>r.idle&&!stale&&!state.error);
  $('summary').innerHTML=stat('当前展示 DSW',rows.length,'台','已隐藏停止和失败节点')+stat('运行中',running.length,'台',`${running.reduce((a,r)=>a+r.cpu,0)} 核 CPU 已分配`,true)+stat('已分配 GPU',running.reduce((a,r)=>a+r.gpu,0),'张','统计所有运行中节点')+stat('比较空闲',idle.length,'台',`${idle.reduce((a,r)=>a+r.gpu,0)} 张 GPU · CPU / GPU 均低于 20%`,true);
  renderGroups(s.instances,!stale&&!state.error);
+ renderTraining(s.instances,!stale&&!state.error&&!fromCache);
  const q=$('search').value.trim().toLowerCase();
  visible=rows.filter(r=>filter==='all'||filter==='idle'&&r.idle&&!stale&&!state.error||filter==='other'&&r.status!=='Running'||filter==='Running'&&r.status==='Running').filter(r=>!$('group').value||$('group').value==='all'||groupOf(r).id===$('group').value).filter(r=>!q||[r.name,r.id,groupOf(r).name,...r.ports.flatMap(p=>[p.port,p.host])].some(v=>String(v??'').toLowerCase().includes(q)));
  const order=$('sort').value;
@@ -150,6 +174,12 @@ function validStatus(data){
  return s.instances.every(r=>{
   if(!object(r)||typeof r.id!=='string'||ids.has(r.id)||typeof r.name!=='string'||typeof r.status!=='string'||!Number.isFinite(r.cpu)||r.cpu<0||!Number.isFinite(r.gpu)||r.gpu<0||!Array.isArray(r.ports)||!object(r.metrics))return false;
   ids.add(r.id);
+  if(r.training!==undefined){
+   const t=r.training;
+   if(!object(t)||!['ready','pending','unavailable'].includes(t.status)||!Array.isArray(t.jobs)||t.jobs.length>50)return false;
+   if(t.observed_at!==undefined&&!Number.isFinite(Date.parse(t.observed_at)))return false;
+   if(!t.jobs.every(j=>object(j)&&typeof j.program==='string'&&typeof j.status==='string'&&['step','total','remaining_seconds'].every(k=>j[k]===undefined||j[k]===null||Number.isFinite(j[k]))&&['progress_at','eta_at'].every(k=>j[k]===undefined||j[k]===null||Number.isFinite(Date.parse(j[k])))))return false;
+  }
   return r.ports.every(object)&&Object.values(r.metrics).every(v=>object(v)&&(!v.points||Array.isArray(v.points)&&v.points.every(p=>object(p)&&Number.isFinite(p.time)&&Number.isFinite(p.value))));
  });
 }
