@@ -21,10 +21,10 @@ const ssh = r => r.ports.find(p => String(p.service).toUpperCase() === 'SSH' && 
 const portOrder = r => Number(ssh(r)?.port ?? 999999);
 const m = (r,k) => r.metrics[k] || {};
 const metricKnown = (r,k) => m(r,k).fresh && m(r,k).latest !== null && m(r,k).latest !== undefined;
-// Allocation confirmed by the owner on 2026-11-20; names and active ports remain live API data.
+// Allocation updated by the owner on 2026-11-26; names and active ports remain live API data.
 const allocations = [
  {id:'fudan',name:'复旦 · qianrui',gpu:16,nodes:[['dsw-ugznzc40h3d5vnlfx3',909],['dsw-vqavb9oc0or51bkgz5',991],['dsw-sq97gl9f1zru2bm1xh',946]]},
- {id:'ntu',name:'NTU · 胡连宇',gpu:12,nodes:[['dsw-hgq4odu0jfbvg7iu8x',951],['dsw-8ox9zktttck0mubnte',1020],['dsw-qwhdob2zqvzesz1ec5',874]]},
+ {id:'ntu',name:'NTU · 胡连宇',gpu:12,nodes:[['dsw-hgq4odu0jfbvg7iu8x',951],['dsw-3uugyxn93fvqvuvelv',1019],['dsw-qwhdob2zqvzesz1ec5',874]]},
  {id:'xie',name:'独立合作者 · 谢育林',gpu:8,nodes:[['dsw-9gvgtpzp8iyuikul0q',855],['dsw-xpe3b8qiiq8a4zmi2u',1088]]},
  {id:'hu',name:'独立合作者 · 胡刘兵',gpu:4,nodes:[['dsw-39vtkvrqohjlhps7yl',987]]},
  {id:'chen',name:'独立合作者 · 陈卢楷',gpu:12,nodes:[['dsw-jsvn6euz7njy70c36j',926],['dsw-x885rk24n7y8dtscod',945]]},
