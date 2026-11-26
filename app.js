@@ -39,17 +39,17 @@ function groupUsage(rows,kind,weight,confirmed){
  return {total,covered,avg:covered?known.reduce((a,r)=>a+m(r,kind).avg*r[weight],0)/covered:null};
 }
 function groupNodeUsage(row,kind,confirmed){
- if(!row||row.status!=='Running')return '<span class="group-node-value muted">—</span>';
+ if(!row||row.status!=='Running'||!ssh(row))return '<span class="group-node-value muted" title="节点离线或端口未就绪，暂无当前指标">未知</span>';
  const val=m(row,kind),known=confirmed&&metricKnown(row,kind)&&Number.isFinite(val.latest);
  const sampled=known&&val.latest_time?new Date(typeof val.latest_time==='number'?val.latest_time*1000:val.latest_time).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,hour:'2-digit',minute:'2-digit'}):'';
  return `<span class="group-node-value${known&&val.latest<20?' metric-low':''}" title="${esc(known?'最新采样：'+time(val.latest_time):confirmed?'该指标缺失或过期':'当前数据尚未确认')}">${known?fmt(val.latest):confirmed?'未知 / 过期':'未确认'}${sampled?`<small>${sampled}</small>`:''}</span>`;
 }
 function groupNodes(group,members,confirmed){
  const entries=group.nodes.length?group.nodes.map(([id,port])=>({row:members.find(r=>r.id===id),assignedPort:port})):members.map(row=>({row}));
- entries.sort((a,b)=>(Number(ssh(a.row||{ports:[]})?.port??a.assignedPort??999999)-Number(ssh(b.row||{ports:[]})?.port??b.assignedPort??999999))||String(a.row?.name||'').localeCompare(String(b.row?.name||'')));
+ entries.sort((a,b)=>(Number((a.row?.status==='Running'?ssh(a.row)?.port:null)??a.assignedPort??999999)-Number((b.row?.status==='Running'?ssh(b.row)?.port:null)??b.assignedPort??999999))||String(a.row?.name||'').localeCompare(String(b.row?.name||'')));
  const body=entries.map(({row,assignedPort})=>{
-  const current=row&&ssh(row),port=current?.port??assignedPort;
-  const note=!row?'未查询到':!current?(assignedPort?'分配端口 · ':'')+(row.status==='Running'?'无就绪映射':labels[row.status]||row.status):row.status!=='Running'?(labels[row.status]||row.status):'';
+  const current=row?.status==='Running'?ssh(row):null,port=current?.port??assignedPort;
+  const note=!row?'未查询到':!current?(assignedPort?'分配端口 · ':'')+(row.status==='Running'?'无就绪映射':(isDisplayed(row)?'':'离线 · ')+(labels[row.status]||row.status)):row.status!=='Running'?(labels[row.status]||row.status):'';
   return `<span class="group-node-row" title="${esc(row?.name||'节点未查询到')}"><span class="group-node-port">${port?esc(port):'无就绪端口'}${!port?`<small>${esc(row?.name)}</small>`:''}${note?`<small>${esc(note)}</small>`:''}</span><span class="group-node-gpu">${row?esc(row.gpu)+' 张':'未知'}</span>${groupNodeUsage(row,'CpuCoreUsage',confirmed)}${groupNodeUsage(row,'GpuCoreUsage',confirmed)}${groupNodeUsage(row,'GpuMemoryUsage',confirmed)}</span>`;
  }).join('');
  return `<span class="group-nodes"><span class="group-node-heading"><span>端口</span><span>GPU 数</span><span>当前 CPU</span><span>当前 GPU</span><span>当前显存</span></span>${body||'<span class="group-node-empty">暂无节点</span>'}</span>`;
@@ -58,15 +58,14 @@ function renderGroups(rows,confirmed){
  const selected=$('group').value||'all';
  $('group-count').textContent=`${allocations.length} 组 · 分配 ${allocations.reduce((n,g)=>n+g.gpu,0)} 张 GPU`;
  $('groups').innerHTML=[...allocations,unassigned].map(g=>{
-  const members=rows.filter(r=>isDisplayed(r)&&groupOf(r).id===g.id),running=members.filter(r=>r.status==='Running');
-  // A known hidden instance must not reappear as a missing allocation placeholder.
-  const shownGroup={...g,nodes:g.nodes.filter(([id])=>!rows.some(r=>r.id===id&&!isDisplayed(r)))};
+  // Assigned ports remain visible even when their instances stop, fail or disappear.
+  const members=rows.filter(r=>groupOf(r).id===g.id&&(g!==unassigned||isDisplayed(r))),running=members.filter(r=>r.status==='Running');
   const gpu=running.reduce((a,r)=>a+r.gpu,0),cpuUsage=groupUsage(running,'CpuCoreUsage','cpu',confirmed),gpuUsage=groupUsage(running,'GpuCoreUsage','gpu',confirmed);
   const idle=confirmed?running.filter(r=>r.idle):[];
   const unknown=running.filter(r=>!confirmed||!metricKnown(r,'CpuCoreUsage')||!metricKnown(r,'GpuCoreUsage')||!m(r,'CpuCoreUsage').complete_hour||!m(r,'GpuCoreUsage').complete_hour).length;
-  const missing=shownGroup.nodes.filter(([id])=>!members.some(r=>r.id===id)).length;
+  const missing=g.nodes.filter(([id])=>!members.some(r=>r.id===id)).length;
   const usage=(value,unit)=>`${fmt(value.avg)} <span class="coverage">${value.covered}/${value.total} ${unit}有效</span>`;
-  return `<button class="group-card${selected===g.id?' selected':''}" data-group="${g.id}" aria-pressed="${selected===g.id}"><span class="group-name">${esc(g.name)}</span><span class="group-capacity">${gpu}<small> 张运行 / ${g.gpu===null?'未设定':g.gpu+' 张分配'}</small></span><span class="group-ports">${shownGroup.nodes.length?'分配端口 '+shownGroup.nodes.map(([,port])=>port).join(' · '):g===unassigned?'未列入当前分配的节点':'暂无展示端口'}</span>${groupNodes(shownGroup,members,confirmed)}<span class="group-usage">近 1h CPU ${usage(cpuUsage,'核')}<br>近 1h GPU ${usage(gpuUsage,'卡')}</span><span class="group-status">${members.length} 台 · ${running.length} 运行 · ${members.length-running.length} 其他状态${missing?' · '+missing+' 未查询到':''}<br>${confirmed?`比较空闲 ${idle.length} 台 / ${idle.reduce((a,r)=>a+r.gpu,0)} 卡 · 判断未知 ${unknown} 台`:'数据未确认，暂停用量与空闲判断'}</span></button>`;
+  return `<button class="group-card${selected===g.id?' selected':''}" data-group="${g.id}" aria-pressed="${selected===g.id}"><span class="group-name">${esc(g.name)}</span><span class="group-capacity">${gpu}<small> 张运行 / ${g.gpu===null?'未设定':g.gpu+' 张分配'}</small></span><span class="group-ports">${g.nodes.length?'分配端口 '+g.nodes.map(([,port])=>port).join(' · '):g===unassigned?'未列入当前分配的节点':'暂无展示端口'}</span>${groupNodes(g,members,confirmed)}<span class="group-usage">近 1h CPU ${usage(cpuUsage,'核')}<br>近 1h GPU ${usage(gpuUsage,'卡')}</span><span class="group-status">${members.length} 台 · ${running.length} 运行 · ${members.length-running.length} 其他状态${missing?' · '+missing+' 未查询到':''}<br>${confirmed?`比较空闲 ${idle.length} 台 / ${idle.reduce((a,r)=>a+r.gpu,0)} 卡 · 判断未知 ${unknown} 台`:'数据未确认，暂停用量与空闲判断'}</span></button>`;
  }).join('');
 }
 $('group').innerHTML='<option value="all">全部分组</option>'+[...allocations,unassigned].map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('');
